@@ -29,8 +29,9 @@ import defines::*;
 // - Shift significand right to truncate fractional bit positions
 //
 
-module fp_execute_stage2(
-    input                                       clk,
+module fp_execute_stage2
+    #(parameter CORE_ID = '0)
+    (input                                       clk,
     input                                       reset,
 
     // From writeback_stage
@@ -91,9 +92,14 @@ module fp_execute_stage2(
     output logic[NUM_VECTOR_LANES - 1:0]        fx2_mul_underflow,
     output logic[NUM_VECTOR_LANES - 1:0]        fx2_mul_sign);
 
+    logic fmul;
+    logic imul;
     logic imulhs;
 
     assign imulhs = fx1_instruction.alu_op == OP_MULH_I;
+    assign fmul = fx1_instruction.alu_op == OP_MUL_F;
+    assign imul = fx1_instruction.alu_op == OP_MULL_I || fx1_instruction.alu_op == OP_MULH_U
+        || fx1_instruction.alu_op == OP_MULH_I;
 
     genvar lane_idx;
     generate
@@ -106,10 +112,25 @@ module fp_execute_stage2(
             logic sticky;
             logic[63:0] sext_multiplicand;
             logic[63:0] sext_multiplier;
+            logic[63:0] lb_apfm_result;
+            logic[63:0] dtcl_apfm_result;
+            logic[63:0] exact_result;
 
             assign {aligned_significand, guard, round, sticky_bits} = {fx1_significand_se[lane_idx], 27'd0} >>
                 fx1_se_align_shift[lane_idx];
             assign sticky = |sticky_bits;
+
+            // Approximate floating point multiplicator
+            LB_AFPM_lite lb_apfm(
+                .fp_sig_multiplier(fx1_multiplier[lane_idx]),
+                .fp_sig_multiplicand(fx1_multiplicand[lane_idx]),
+                .fp_sig_product(lb_apfm_result));
+            DTCL_AFPM_lite dtcl_apfm(
+                .fp_sig_multiplier(fx1_multiplier[lane_idx]),
+                .fp_sig_multiplicand(fx1_multiplicand[lane_idx]),
+                .fp_sig_product(dtcl_apfm_result));
+
+            assign exact_result = sext_multiplicand * sext_multiplier;
 
             // Sign extend multiply operands
             assign sext_multiplicand = {{32{fx1_multiplicand[lane_idx][31] && imulhs}},
@@ -136,7 +157,15 @@ module fp_execute_stage2(
                 fx2_ftoi_lshift[lane_idx] <= fx1_ftoi_lshift[lane_idx];
 
                 // XXX Simple version. Should have a wallace tree here to collect partial products.
-                fx2_significand_product[lane_idx] <= sext_multiplicand * sext_multiplier;
+                //fx2_significand_product[lane_idx] <= sext_multiplicand * sext_multiplier;
+                // With fx1_thread_idx which threads are getting the approximated multiplicator
+                if (fmul) begin
+                    //fx2_significand_product[lane_idx] <= lb_apfm_result;
+                    fx2_significand_product[lane_idx] <= dtcl_apfm_result;
+                end else begin
+                    fx2_significand_product[lane_idx] <= exact_result;
+                end
+                //fx2_significand_product[lane_idx] <= sext_multiplicand * sext_multiplier;
             end
         end
     endgenerate

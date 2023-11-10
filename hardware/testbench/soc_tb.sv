@@ -24,11 +24,15 @@ import defines::*;
 // device, etc.
 //
 
+/*verilator tracing_off*/
+
 module soc_tb(
     input       clk,
     input       reset);
-
-    localparam MEM_SIZE = 'h1000000;
+    // 16 MB Memory
+    //localparam MEM_SIZE = 'h1000000;
+    // More memory for sceneviewer (48 MB)
+    localparam MEM_SIZE = 'h3000000;
     localparam NUM_PERIPHERALS = 6;
 
     int total_cycles;
@@ -133,6 +137,8 @@ module soc_tb(
     assign axi_bus_s[1].s_rvalid = 0;
 `endif
 
+    /*verilator tracing_on*/ 
+
     nyuzi #(.RESET_PC(RESET_PC)) nyuzi(
         .axi_bus(axi_bus_m[0]),
         .io_bus(nyuzi_io_bus),
@@ -144,6 +150,8 @@ module soc_tb(
             cosim_interrupt}),
         .jtag(target_jtag),
         .*);
+
+    /*verilator tracing_off*/ 
 
     assign processor_halt = nyuzi.thread_en == '0;
 
@@ -174,12 +182,16 @@ module soc_tb(
         .axi_bus(axi_bus_s[0]),
         .*);
 
+    
+
     sim_sdram #(
         .DATA_WIDTH(SDRAM_DATA_WIDTH),
         .ROW_ADDR_WIDTH(SDRAM_ROW_ADDR_WIDTH),
         .COL_ADDR_WIDTH(SDRAM_COL_ADDR_WIDTH),
         .MAX_REFRESH_INTERVAL(800)
     ) memory(.*);
+
+    
 
     //
     // Peripherals
@@ -231,25 +243,31 @@ module soc_tb(
     target_jtag.tms = 0;
 `endif
 
-`ifdef SIMULATE_VGA
+//`ifdef SIMULATE_VGA
    // There is no automated test for VGA currently, so I test as follows:
    // - Modify the makefile to add --trace-depth 1 to VERILATOR_OPTIONS
    // - Rebuild hardware: DUMP_WAVEFORM=1 make
    // - Run one of the apps (like mandelbrot) for maybe 20 seconds, ctrl-C to stop
    // - Look the resulting waveform in GtkWave to check that the timings are correct.
+
+
+
+
    vga_controller #(.BASE_ADDRESS('h180))
    vga_controller(
                   .io_bus(peripheral_io_bus[IO_VGA]),
                   .axi_bus(axi_bus_m[1]),
                   .*);
-`else // !`ifdef SIMULATE_VGA
+
+
+/*`else // !`ifdef SIMULATE_VGA
     // The s1 interface is not connected to anything in this configuration.
     assign axi_bus_m[1].m_awvalid = 0;
     assign axi_bus_m[1].m_wvalid = 0;
     assign axi_bus_m[1].m_arvalid = 0;
     assign axi_bus_m[1].m_rready = 0;
     assign axi_bus_m[1].m_bready = 0;
-`endif // !`ifdef SIMULATE_VGA
+`endif // !`ifdef SIMULATE_VGA*/
 
     assign peripheral_io_bus[IO_ONES].read_data = 32'hffffffff;
 
@@ -427,6 +445,8 @@ module soc_tb(
             `L2_WAYS * `L2_SETS * CACHE_LINE_BYTES / 1024, `L2_WAYS,
             `ITLB_ENTRIES, `DTLB_ENTRIES);
 
+        $display("Test String");
+
         if ($test$plusargs("statetrace") != 0)
         begin
             state_dump_en = 1;
@@ -453,6 +473,7 @@ module soc_tb(
             $display("No memory image file specified with +bin");
             $finish;
         end
+
     end
 
     final
@@ -496,6 +517,10 @@ module soc_tb(
 
         if (profile_en)
             $fclose(profile_fd);
+
+        // Last frame dump bevore the processor ends
+        flush_l2_cache;
+        generateFrameDump;
 
         // Do this last so emulator doesn't kill us with SIGPIPE during cosimulation.
         if (processor_halt)
@@ -543,4 +568,54 @@ module soc_tb(
                 $fwrite(profile_fd, "%x\n", `CORE0.ifetch_tag_stage.next_program_counter[$random() % `THREADS_PER_CORE]);
         end
     end
+
+    // Try to generate a framedump and write it to a file (ppm format)
+    int frameCounter = 0;
+    int frameFileCount = 0;
+    int frameWidth = 640;
+    string sframeWidth = "640";
+    int frameHeight = 480;
+    string sframeHeight = "480";
+    int frameBaseAddr = 32'h200000;
+    //string frameFileNameTemplate = "frame_%s.ppm";
+
+    // Capture frame buffer every 10th frame update 
+    always_ff @(posedge frame_interrupt) begin
+        frameCounter <= frameCounter + 1;
+        if(frameCounter%10 == 0) begin
+             generateFrameDump;
+             frameFileCount <= frameFileCount + 1;
+        end
+    end
+
+    task generateFrameDump;
+    begin
+        int fd;
+        string frameFileName; 
+        string frameNumber;
+        // New frame file name
+        frameNumber.itoa(frameFileCount);
+        frameFileName = $sformatf("frame_%s.ppm",frameNumber);
+        fd = $fopen(frameFileName,"w");
+        if(fd == 0) begin
+            $display("File %s could not be created: %d",frameFileName,fd);
+        end else begin
+            $display("File %s created",frameFileName);
+        end
+
+        // Write ppm header
+        $fwrite(fd,"P3\n%s %s\n255\n",sframeWidth,sframeHeight);
+        // Write frame content
+        for (int h = 0; h < frameHeight; h++) begin
+            for(int v = 0; v < frameWidth; v++) begin
+                $fwrite(fd,"%d %d %d\n",memory.sdram_data[frameBaseAddr/4+h*frameWidth+v][31:24],
+                                        memory.sdram_data[frameBaseAddr/4+h*frameWidth+v][23:16],
+                                        memory.sdram_data[frameBaseAddr/4+h*frameWidth+v][15:8]);
+            end
+        end
+
+        $fclose(fd);
+    end
+    endtask
+
 endmodule
